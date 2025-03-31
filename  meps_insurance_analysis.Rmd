@@ -1,0 +1,263 @@
+---
+title: "MEPS Insurance Analysis"
+author: "Rose Danuser"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r echo=TRUE, results='hide'}
+library(pacman)
+p_load(dplyr, knitr, skimr, tidyr, ggplot2, stringr, broom, gridExtra, gt, gtsummary, emmeans, readxl)
+
+setwd("~/Downloads")
+heus <- read_excel("heus_mepssample 3.2025.xls")
+
+head(heus)
+str(heus)
+```
+
+# 1. How many unique individuals were surveyed?
+```{r}
+n_distinct(heus$dupersid)
+```
+
+# 2. How many unique households were surveyed? 
+```{r}
+n_distinct(heus$duid)
+```
+
+# 3. Create a table reporting means or proportions of the following: age, gender, race, family size, education, insurance status, and region. 
+```{r echo=TRUE, results='hide'}
+heus <- heus %>%
+  mutate(across(c(female, race_bl, race_oth, eth_hisp, ed_hs, ed_hsplus, ed_col, ed_colplus, reg_midw, reg_south, reg_west, ins_mcare, ins_mcaid, ins_unins, ins_dent), as.factor))
+
+
+list(
+  race_bl = heus %>% count(race_bl),
+  race_oth = heus %>% count(race_oth),
+  eth_hisp = heus %>% count(eth_hisp)
+)
+
+
+heus <- heus %>%
+  mutate(
+    race_eth = case_when(
+      eth_hisp == "Hispanic" ~ "Hispanic",
+      race_bl == "Black race" ~ "Non-Hispanic Black",
+      race_oth == "Other race" ~ "Non-Hispanic Other",
+      TRUE ~ "Non-Hispanic White"
+    ))
+
+heus <- heus %>%
+  mutate(
+    edu_cat = case_when(
+      ed_colplus == "1" ~ "Graduate or professional degree",
+      ed_col == "College degree" ~ "Bachelor's degree or equivalent",
+      ed_hsplus == "Some college education" ~ "Some college, no degree",
+      ed_hs == "High school education" ~ "High school diploma",
+      TRUE ~ "Less than a high school diploma"
+    ),
+    edu_cat = factor(edu_cat, levels = c(
+      "Less than a high school diploma", "High school diploma", "Some college, no degree", 
+      "Bachelor's degree or equivalent", "Graduate or professional degree"
+    ), ordered = TRUE)
+  )
+
+heus <- heus %>%
+  mutate(
+    region_cat = case_when(
+      reg_midw == "Midwest" ~ "Midwest",
+      reg_south == "South" ~ "South",
+      reg_west == "West" ~ "West",
+      TRUE ~ "Northeast"
+    ),
+    region_cat = factor(region_cat, levels = c("Northeast", "Midwest", "South", "West"))
+  )
+
+heus <- heus %>%
+  mutate(
+    insurance_cat = case_when(
+      ins_unins == "Uninsured" ~ "Uninsured",
+      ins_mcare == "Medicare" & ins_mcaid == "Medicaid" ~ "Dual Eligible",
+      ins_mcare == "Medicare" ~ "Medicare only",
+      ins_mcaid == "Medicaid" ~ "Medicaid only",
+      TRUE ~ "Other/Unknown"
+    ),
+    insurance_cat = factor(insurance_cat, levels = c(
+      "Uninsured", "Medicaid only", "Medicare only", "Dual Eligible", "Other/Unknown"))
+  )
+
+head(heus)
+```
+
+
+
+```{r}
+mep2004 <- heus %>%
+  select(age, female, race_eth, famsize, edu_cat, insurance_cat, region_cat) %>%
+  tbl_summary(
+    statistic = list(
+      all_continuous() ~ "{mean} ({sd})",
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+    label = list(
+      age ~ "Age",
+      famsize ~ "Family Size",
+      female ~ "Gender",
+      race_eth ~ "Race/Ethnicity",
+      edu_cat ~ "Education",
+      insurance_cat ~ "Insurance Status",
+      region_cat ~ "Region"
+    )
+  ) %>%
+  bold_labels() %>%
+  as_gt() %>%
+  tab_header(
+      title = "Demographic and Insurance Characteristics of the 2004 Medical Expenditure Panel Survey (MEPS) Sample (n = 19,386)"
+    )
+
+mep2004
+gtsave(mep2004, "mep2004.docx", path = "~/Downloads")
+
+```
+
+
+
+# 4. Create a visualization showing the mean and 95% confidence interval of total medical expenditures (exp_total) for every 10 year age interval across the sample (e.g. less than 20, 20-29, 30-39...).
+
+```{r}
+# create age groups; intervals are left-inclusive and right-exclusive
+heus <- heus %>%
+  mutate(age_group = cut(age,
+                         breaks = c(0, 20, 30, 40, 50, 60, 70, 80, Inf),
+                         labels = c("<20", "20–29", "30–39", "40–49", "50–59", "60–69", "70–79", "80+"),
+                         right = FALSE))
+# table(heus$age_group)
+
+# Summarize mean and 95% CI of total expenditures by age group
+total_exp_byAge <- heus %>%
+  group_by(age_group) %>%
+  summarize(
+    mean_exp = mean(exp_tot, na.rm = TRUE),
+    se = sd(exp_tot, na.rm = TRUE) / sqrt(n()),
+    lower = mean_exp - 1.96 * se,
+    upper = mean_exp + 1.96 * se
+  ) %>%
+  ungroup()
+
+# Plot point estimates with error bars representing 95% confidence intervals
+tot_exp_byAge_plot <- ggplot(total_exp_byAge, aes(x = age_group, y = mean_exp)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) +
+  labs(
+    title = "Mean Total Medical Expenditures by Age Group",
+    subtitle = "95% Confidence Intervals (MEPS 2004)",
+    x = "Age Group",
+    y = "Mean Total Expenditures (USD)"
+  ) +
+  theme_bw()
+tot_exp_byAge_plot
+
+ggsave("tot_exp_byAge_plot.png", plot = tot_exp_byAge_plot, width = 11, height = 8.5, dpi = 300, units = "in")
+```
+
+# 5. Specify a statistical model to estimate the association between insurance status (ins_) and total medical care expenses. Explain which variables you may want to control for. Explain your choice of statistical model. Create a table with results from the analysis and interpret the results. {.tabset .tabset-fade}
+
+```{r, echo=TRUE, include=FALSE}
+hist(heus$exp_tot)
+hist(log1p(heus$exp_tot))
+```
+
+I first estimated a base model with insurance status as the only predictor of log-transformed total medical expenditures. I then fit a fully adjusted multivariable OLS model including age, gender, race/ethnicity, education, region, and family size to account for potential confounding.
+
+Log-transformation (log1p) was used to account for the right-skewed distribution of medical expenditures and avoid issues with zero values.
+
+## null model
+```{r}
+# Uninsured as the reference level
+heus <- heus %>%
+  mutate(insurance_cat = relevel(factor(insurance_cat), ref = "Uninsured"))
+
+# null model
+m0 <- lm(log1p(exp_tot) ~ insurance_cat, data = heus)
+summary(m0)
+```
+## Full adjusted model; controlling for key confounders
+
+```{r}
+m1 <- lm(log1p(exp_tot) ~ insurance_cat + age + female + race_eth + edu_cat + region_cat + famsize, data = heus)
+summary(m1)
+```
+
+```{r echo=TRUE, results='hide'}
+# adjusted means and 95% CI
+em_summary <- emmeans(m1, ~ insurance_cat) %>%
+  summary(type = "response") %>%
+  as_tibble() %>%
+  select(insurance_cat, adj_mean = response, lower.CL, upper.CL)
+
+# vector of groups to compare against Uninsured
+groups <- c("Medicaid only", "Medicare only", "Dual Eligible", "(Other/Unknown)")
+
+pval_tbl <- purrr::map_dfr(groups, function(g) {
+  contrast_label <- paste(g, "- Uninsured")
+  p <- contrast(emmeans(m1, ~ insurance_cat), method = "revpairwise") %>%
+    summary(type = "response") %>%
+    as_tibble() %>%
+    filter(contrast == contrast_label) %>%
+    pull(p.value)
+  tibble(
+    insurance_cat = g,
+    p.value = case_when(
+      length(p) == 0 ~ NA_character_,
+      p < 0.001 ~ "<0.001",
+      TRUE ~ sprintf("%.3f", p)))
+})
+pval_tbl <- pval_tbl %>%
+  mutate(insurance_cat = str_replace_all(insurance_cat, "[()]", ""))
+
+
+final_emmeans <- left_join(em_summary, pval_tbl, by = "insurance_cat")
+
+final_emmeans <- final_emmeans %>%
+  mutate(
+    `Adjusted Mean (95% CI)` = sprintf("%.2f (%.2f, %.2f)", adj_mean, lower.CL, upper.CL)
+  ) %>%
+  select(
+    `Insurance Category` = insurance_cat,
+    `Adjusted Mean (95% CI)`,
+    `p-value` = p.value
+  )
+final_emmeans
+```
+
+# 
+Adjusted mean expenditures by insurance category, back-transformed to the original scale, are shown in Table 2. Uninsured individuals had the lowest mean expenditures (46.40; 95% CI: 41.85, 51.43). In contrast, expenditures were significantly higher among individuals with public insurance. Medicaid enrollees had a mean expenditure of 687.86 (95% CI: 607.50, 778.83), and Medicare enrollees averaged 539.29 (95% CI: 472.52, 615.47). Dual eligible individuals had the highest adjusted expenditures at 1361.81 (95% CI: 1118.89, 1657.42). All comparisons to the uninsured were statistically significant (p < 0.001).
+
+```{r}
+adjusted_tot_exp <- final_emmeans %>%
+  gt() %>%
+  cols_align(
+  align = "left",
+  ) %>%
+  tab_header(
+    title = "Table 2. Adjusted Medical Expenditures by Insurance Category",
+    subtitle = "Estimates from Multivariable OLS Model, Back-Transformed from Log1p (MEPS 2004)"
+  ) %>%
+  tab_source_note("Adjusted for age, gender, race/ethnicity, education, region, and family size.") %>%
+tab_source_note("Reference group: Uninsured")
+
+adjusted_tot_exp
+gtsave(adjusted_tot_exp, "adjusted_tot_exp.docx", path = "~/Downloads")
+```
+
+# Session Info
+<br><br>
+```{r echo=FALSE}
+sessionInfo()
+```
+
